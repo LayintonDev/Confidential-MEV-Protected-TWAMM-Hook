@@ -1,0 +1,9 @@
+[submodule "smartcontract/lib/v4-core"]
+	path = smartcontract/lib/v4-core
+	url = https://github.com/uniswap/v4-core
+[submodule "smartcontract/lib/v4-periphery"]
+	path = smartcontract/lib/v4-periphery
+	url = https://github.com/uniswap/v4-periphery
+[submodule "smartcontract/lib/cofhe-contracts"]
+	path = smartcontract/lib/cofhe-contracts
+	url = https://github.com/fhenixprotocol/cofhe-contracts
