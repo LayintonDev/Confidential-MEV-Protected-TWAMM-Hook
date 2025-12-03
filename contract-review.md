@@ -1,10 +1,8 @@
 # Contract Requirements Analysis
 
 **Contract**: `ConfidentialTWAMMHook.sol`  
-**Review Date**: 2025-12-03  
-**Reviewer**: Antigravity AI
 
-This document analyzes the `ConfidentialTWAMMHook.sol` contract against the MVP requirements specified in `note.md`.
+This document analyzes the `ConfidentialTWAMMHook.sol` contract against the MVP requirements specified in `project-requirement.md`.
 
 ---
 
