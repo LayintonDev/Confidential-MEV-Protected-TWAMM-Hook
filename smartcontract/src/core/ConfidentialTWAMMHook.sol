@@ -90,7 +90,7 @@ contract ConfidentialTWAMMHook is BaseHook, IConfidentialTWAMM {
         EncryptedOrder storage order = _orders[poolId][orderId];
         
         if (!order.isActive || order.isCancelled) revert InvalidOrder();
-        if (block.number < order.startBlock) revert OrderNotStarted();
+        if (block.number <= order.startBlock) revert OrderNotStarted();
 
         _executeSlice(poolKey, orderId, order);
     }

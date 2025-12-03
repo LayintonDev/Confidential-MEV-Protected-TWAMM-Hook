@@ -17,13 +17,17 @@ import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/Pool
 import {ConfidentialTWAMMHook} from "../src/core/ConfidentialTWAMMHook.sol";
 import {IConfidentialTWAMM} from "../src/interfaces/IConfidentialTWAMM.sol";
 import {FHE, euint256, euint64} from "cofhe-contracts/FHE.sol";
+import {MockTaskManager} from "./mocks/MockTaskManager.sol";
 
 contract ConfidentialTWAMMHookTest is Test, Deployers {
     using PoolIdLibrary for PoolKey;
 
     ConfidentialTWAMMHook public hook;
+    MockTaskManager public mockTaskManager;
     PoolKey public poolKey;
     uint160 public initSqrtPriceX96;
+
+    address constant TASK_MANAGER_ADDRESS = 0xeA30c4B8b44078Bbf8a6ef5b9f1eC1626C7848D9;
 
     address public alice = makeAddr("alice");
     address public bob = makeAddr("bob");
@@ -36,6 +40,9 @@ contract ConfidentialTWAMMHookTest is Test, Deployers {
     function setUp() public {
         deployFreshManagerAndRouters();
         deployMintAndApprove2Currencies();
+
+        mockTaskManager = new MockTaskManager();
+        vm.etch(TASK_MANAGER_ADDRESS, address(mockTaskManager).code);
 
         uint160 flags = uint160(Hooks.AFTER_SWAP_FLAG);
         address hookAddress = address(uint160(type(uint160).max & clearAllHookPermissionsMask | flags));
@@ -72,12 +79,29 @@ contract ConfidentialTWAMMHookTest is Test, Deployers {
         modifyLiquidityRouter.modifyLiquidity(poolKey, params, "");
     }
 
+    function _addLiquidityToPool(PoolKey memory key) internal {
+        ModifyLiquidityParams memory params = ModifyLiquidityParams({
+            tickLower: -120,
+            tickUpper: 120,
+            liquidityDelta: 1e18,
+            salt: 0
+        });
+
+        modifyLiquidityRouter.modifyLiquidity(key, params, "");
+    }
+
     function _createEncryptedValue(uint256 value) internal returns (euint256) {
-        return FHE.asEuint256(value);
+        euint256 encrypted = FHE.asEuint256(value);
+        uint256 hash = euint256.unwrap(encrypted);
+        mockTaskManager.setDecryptResult(hash, value);
+        return encrypted;
     }
 
     function _createEncryptedDuration(uint64 value) internal returns (euint64) {
-        return FHE.asEuint64(value);
+        euint64 encrypted = FHE.asEuint64(value);
+        uint256 hash = euint64.unwrap(encrypted);
+        mockTaskManager.setDecryptResult(hash, value);
+        return encrypted;
     }
 
     function test_submitEncryptedOrder() public {
@@ -234,14 +258,15 @@ contract ConfidentialTWAMMHookTest is Test, Deployers {
 
     function test_multipleOrdersDifferentPools() public {
         PoolKey memory poolKey2 = PoolKey({
-            currency0: currency1,
-            currency1: currency0,
-            fee: 3000,
+            currency0: currency0,
+            currency1: currency1,
+            fee: 5000,
             tickSpacing: 60,
             hooks: IHooks(address(hook))
         });
 
         manager.initialize(poolKey2, initSqrtPriceX96);
+        _addLiquidityToPool(poolKey2);
 
         euint256 amount1 = _createEncryptedValue(1000e18);
         euint64 duration1 = _createEncryptedDuration(100);
