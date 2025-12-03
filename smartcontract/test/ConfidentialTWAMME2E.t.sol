@@ -120,6 +120,13 @@ contract ConfidentialTWAMME2ETest is Test, Deployers {
         return encrypted;
     }
 
+    function _createEncryptedDirection(uint64 value) internal returns (euint64) {
+        euint64 encrypted = FHE.asEuint64(value);
+        uint256 hash = euint64.unwrap(encrypted);
+        mockTaskManager.setDecryptResult(hash, value);
+        return encrypted;
+    }
+
     function test_CompleteTWAMMExecutionFlow() public {
         uint256 orderAmount = 10000e18;
         uint64 duration = 500;
@@ -127,11 +134,12 @@ contract ConfidentialTWAMME2ETest is Test, Deployers {
 
         euint256 encryptedAmount = _createEncryptedValue(orderAmount);
         euint64 encryptedDuration = _createEncryptedDuration(duration);
+        euint64 encryptedDirection = _createEncryptedDirection(direction);
 
         vm.prank(alice);
         vm.expectEmit(true, true, true, true);
         emit OrderSubmitted(1, alice, poolKey);
-        uint256 orderId = hook.submitEncryptedOrder(poolKey, encryptedAmount, encryptedDuration, direction);
+        uint256 orderId = hook.submitEncryptedOrder(poolKey, encryptedAmount, encryptedDuration, encryptedDirection);
 
         assertEq(orderId, 1);
 
@@ -176,13 +184,15 @@ contract ConfidentialTWAMME2ETest is Test, Deployers {
     function test_MultipleOrdersExecution() public {
         euint256 amount1 = _createEncryptedValue(5000e18);
         euint64 duration1 = _createEncryptedDuration(300);
+        euint64 direction1 = _createEncryptedDirection(0);
         
         euint256 amount2 = _createEncryptedValue(8000e18);
         euint64 duration2 = _createEncryptedDuration(400);
+        euint64 direction2 = _createEncryptedDirection(1);
 
         vm.startPrank(alice);
-        uint256 orderId1 = hook.submitEncryptedOrder(poolKey, amount1, duration1, 0);
-        uint256 orderId2 = hook.submitEncryptedOrder(poolKey, amount2, duration2, 1);
+        uint256 orderId1 = hook.submitEncryptedOrder(poolKey, amount1, duration1, direction1);
+        uint256 orderId2 = hook.submitEncryptedOrder(poolKey, amount2, duration2, direction2);
         vm.stopPrank();
 
         assertEq(orderId1, 1);
@@ -217,9 +227,10 @@ contract ConfidentialTWAMME2ETest is Test, Deployers {
 
         euint256 encryptedAmount = _createEncryptedValue(orderAmount);
         euint64 encryptedDuration = _createEncryptedDuration(duration);
+        euint64 encryptedDirection = _createEncryptedDirection(0);
 
         vm.prank(alice);
-        uint256 orderId = hook.submitEncryptedOrder(poolKey, encryptedAmount, encryptedDuration, 0);
+        uint256 orderId = hook.submitEncryptedOrder(poolKey, encryptedAmount, encryptedDuration, encryptedDirection);
 
         vm.roll(block.number + 500);
 
@@ -258,9 +269,10 @@ contract ConfidentialTWAMME2ETest is Test, Deployers {
 
         euint256 encryptedAmount = _createEncryptedValue(orderAmount);
         euint64 encryptedDuration = _createEncryptedDuration(duration);
+        euint64 encryptedDirection = _createEncryptedDirection(0);
 
         vm.prank(alice);
-        hook.submitEncryptedOrder(poolKey, encryptedAmount, encryptedDuration, 0);
+        hook.submitEncryptedOrder(poolKey, encryptedAmount, encryptedDuration, encryptedDirection);
 
         vm.roll(block.number + 500);
 
@@ -291,9 +303,10 @@ contract ConfidentialTWAMME2ETest is Test, Deployers {
 
         euint256 encryptedAmount = _createEncryptedValue(orderAmount);
         euint64 encryptedDuration = _createEncryptedDuration(duration);
+        euint64 encryptedDirection = _createEncryptedDirection(direction);
 
         vm.prank(bob);
-        uint256 orderId = hook.submitEncryptedOrder(poolKey, encryptedAmount, encryptedDuration, direction);
+        uint256 orderId = hook.submitEncryptedOrder(poolKey, encryptedAmount, encryptedDuration, encryptedDirection);
 
         vm.roll(block.number + 300);
 
@@ -318,15 +331,17 @@ contract ConfidentialTWAMME2ETest is Test, Deployers {
     function test_MultipleUsersOrders() public {
         euint256 amountAlice = _createEncryptedValue(10000e18);
         euint64 durationAlice = _createEncryptedDuration(400);
+        euint64 directionAlice = _createEncryptedDirection(0);
         
         euint256 amountBob = _createEncryptedValue(15000e18);
         euint64 durationBob = _createEncryptedDuration(500);
+        euint64 directionBob = _createEncryptedDirection(1);
 
         vm.prank(alice);
-        uint256 orderIdAlice = hook.submitEncryptedOrder(poolKey, amountAlice, durationAlice, 0);
+        uint256 orderIdAlice = hook.submitEncryptedOrder(poolKey, amountAlice, durationAlice, directionAlice);
 
         vm.prank(bob);
-        uint256 orderIdBob = hook.submitEncryptedOrder(poolKey, amountBob, durationBob, 1);
+        uint256 orderIdBob = hook.submitEncryptedOrder(poolKey, amountBob, durationBob, directionBob);
 
         assertEq(orderIdAlice, 1);
         assertEq(orderIdBob, 2);
@@ -362,9 +377,10 @@ contract ConfidentialTWAMME2ETest is Test, Deployers {
 
         euint256 encryptedAmount = _createEncryptedValue(orderAmount);
         euint64 encryptedDuration = _createEncryptedDuration(duration);
+        euint64 encryptedDirection = _createEncryptedDirection(0);
 
         vm.prank(alice);
-        uint256 orderId = hook.submitEncryptedOrder(poolKey, encryptedAmount, encryptedDuration, 0);
+        uint256 orderId = hook.submitEncryptedOrder(poolKey, encryptedAmount, encryptedDuration, encryptedDirection);
 
         uint256 startBlock = block.number;
         (,,, uint64 storedStartBlock,,) = hook.getOrderStatus(poolKey, orderId);
@@ -395,9 +411,10 @@ contract ConfidentialTWAMME2ETest is Test, Deployers {
 
         euint256 encryptedAmount = _createEncryptedValue(orderAmount);
         euint64 encryptedDuration = _createEncryptedDuration(duration);
+        euint64 encryptedDirection = _createEncryptedDirection(0);
 
         vm.prank(alice);
-        hook.submitEncryptedOrder(poolKey, encryptedAmount, encryptedDuration, 0);
+        hook.submitEncryptedOrder(poolKey, encryptedAmount, encryptedDuration, encryptedDirection);
 
         uint256 blocksElapsed = 500;
         vm.roll(block.number + blocksElapsed);
@@ -426,9 +443,10 @@ contract ConfidentialTWAMME2ETest is Test, Deployers {
 
         euint256 encryptedAmount = _createEncryptedValue(orderAmount);
         euint64 encryptedDuration = _createEncryptedDuration(duration);
+        euint64 encryptedDirection = _createEncryptedDirection(0);
 
         vm.prank(alice);
-        uint256 orderId = hook.submitEncryptedOrder(poolKey, encryptedAmount, encryptedDuration, 0);
+        uint256 orderId = hook.submitEncryptedOrder(poolKey, encryptedAmount, encryptedDuration, encryptedDirection);
 
         vm.prank(bob);
         vm.expectRevert(ConfidentialTWAMMHook.Unauthorized.selector);
@@ -441,9 +459,10 @@ contract ConfidentialTWAMME2ETest is Test, Deployers {
 
         euint256 encryptedAmount = _createEncryptedValue(orderAmount);
         euint64 encryptedDuration = _createEncryptedDuration(duration);
+        euint64 encryptedDirection = _createEncryptedDirection(0);
 
         vm.prank(alice);
-        uint256 orderId = hook.submitEncryptedOrder(poolKey, encryptedAmount, encryptedDuration, 0);
+        uint256 orderId = hook.submitEncryptedOrder(poolKey, encryptedAmount, encryptedDuration, encryptedDirection);
 
         (
             bool isActive,
