@@ -9,6 +9,7 @@ import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IConfidentialTWAMM} from "../interfaces/IConfidentialTWAMM.sol";
 import {FHE, euint256, euint64} from "cofhe-contracts/FHE.sol";
 
@@ -89,7 +90,7 @@ contract ConfidentialTWAMMHook is BaseHook, IConfidentialTWAMM {
         EncryptedOrder storage order = _orders[poolId][orderId];
         
         if (!order.isActive || order.isCancelled) revert InvalidOrder();
-        if (block.number < order.startBlock) revert OrderNotStarted();
+        if (block.number <= order.startBlock) revert OrderNotStarted();
 
         _executeSlice(poolKey, orderId, order);
     }
@@ -184,7 +185,7 @@ contract ConfidentialTWAMMHook is BaseHook, IConfidentialTWAMM {
             zeroForOne: zeroForOne,
             // forge-lint: disable-next-line(unsafe-typecast)
             amountSpecified: -int256(decryptedAmount),
-            sqrtPriceLimitX96: zeroForOne ? 4295128739 : 1461446703485210103287273052203988822378723970342
+            sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
         });
 
         poolManager.swap(poolKey, params, "");
