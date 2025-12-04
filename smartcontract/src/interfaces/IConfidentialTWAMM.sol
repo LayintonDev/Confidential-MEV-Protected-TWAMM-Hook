@@ -2,7 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {euint256, euint64} from "cofhe-contracts/FHE.sol";
+import {euint256, euint64, ebool} from "cofhe-contracts/FHE.sol";
 
 interface IConfidentialTWAMM {
     struct EncryptedOrder {
@@ -14,7 +14,7 @@ interface IConfidentialTWAMM {
         euint256 executedAmount;
         address owner;
         bool isActive;
-        bool isCancelled;
+        ebool isCancelled;
     }
 
     event OrderSubmitted(uint256 indexed orderId, address indexed owner, PoolKey indexed poolKey);
@@ -32,7 +32,7 @@ interface IConfidentialTWAMM {
 
     function executeTWAMMSlice(PoolKey calldata poolKey, uint256 orderId) external;
 
-    function cancelEncryptedOrder(PoolKey calldata poolKey, uint256 orderId) external;
+    function cancelEncryptedOrder(PoolKey calldata poolKey, uint256 orderId, ebool cancelSignal) external;
 
     function withdrawTokens(PoolKey calldata poolKey, uint256 orderId) external;
 
@@ -41,7 +41,7 @@ interface IConfidentialTWAMM {
         view
         returns (
             bool isActive,
-            bool isCancelled,
+            ebool isCancelled,
             address owner,
             uint64 startBlock,
             euint256 amount,

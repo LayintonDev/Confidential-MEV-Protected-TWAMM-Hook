@@ -16,7 +16,7 @@ import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 
 import {ConfidentialTWAMMHook} from "../src/core/ConfidentialTWAMMHook.sol";
 import {IConfidentialTWAMM} from "../src/interfaces/IConfidentialTWAMM.sol";
-import {FHE, euint256, euint64} from "cofhe-contracts/FHE.sol";
+import {FHE, euint256, euint64, ebool} from "cofhe-contracts/FHE.sol";
 import {MockTaskManager} from "./mocks/MockTaskManager.sol";
 
 contract ConfidentialTWAMME2ETest is Test, Deployers {
@@ -127,6 +127,13 @@ contract ConfidentialTWAMME2ETest is Test, Deployers {
         return encrypted;
     }
 
+    function _createEncryptedCancelSignal(bool value) internal returns (ebool) {
+        ebool encrypted = FHE.asEbool(value);
+        uint256 hash = ebool.unwrap(encrypted);
+        mockTaskManager.setDecryptResult(hash, value ? 1 : 0);
+        return encrypted;
+    }
+
     function test_CompleteTWAMMExecutionFlow() public {
         uint256 orderAmount = 10000e18;
         uint64 duration = 500;
@@ -143,11 +150,15 @@ contract ConfidentialTWAMME2ETest is Test, Deployers {
 
         assertEq(orderId, 1);
 
-        (bool isActive, bool isCancelled, address owner, uint64 startBlock,,) =
+        (bool isActive, ebool isCancelled, address owner, uint64 startBlock,,) =
             hook.getOrderStatus(poolKey, orderId);
 
         assertTrue(isActive);
-        assertFalse(isCancelled);
+        FHE.allowThis(isCancelled);
+        FHE.decrypt(isCancelled);
+        bool cancelled;
+        (cancelled,) = FHE.getDecryptResultSafe(isCancelled);
+        assertFalse(cancelled);
         assertEq(owner, alice);
         assertEq(startBlock, block.number);
 
@@ -248,14 +259,19 @@ contract ConfidentialTWAMME2ETest is Test, Deployers {
         vm.prank(trader);
         swapRouter.swap(poolKey, swapParams, settings, "");
 
+        ebool cancelSignal = _createEncryptedCancelSignal(true);
         vm.prank(alice);
         vm.expectEmit(true, true, false, true);
         emit OrderCancelled(orderId, alice);
-        hook.cancelEncryptedOrder(poolKey, orderId);
+        hook.cancelEncryptedOrder(poolKey, orderId, cancelSignal);
 
-        (bool isActive, bool isCancelled,,,,) = hook.getOrderStatus(poolKey, orderId);
+        (bool isActive, ebool isCancelled,,,,) = hook.getOrderStatus(poolKey, orderId);
         assertFalse(isActive);
-        assertTrue(isCancelled);
+        FHE.allowThis(isCancelled);
+        FHE.decrypt(isCancelled);
+        bool cancelled;
+        (cancelled,) = FHE.getDecryptResultSafe(isCancelled);
+        assertTrue(cancelled);
 
         vm.roll(block.number + 500);
 
@@ -449,8 +465,9 @@ contract ConfidentialTWAMME2ETest is Test, Deployers {
         uint256 orderId = hook.submitEncryptedOrder(poolKey, encryptedAmount, encryptedDuration, encryptedDirection);
 
         vm.prank(bob);
+        ebool cancelSignal = _createEncryptedCancelSignal(true);
         vm.expectRevert(ConfidentialTWAMMHook.Unauthorized.selector);
-        hook.cancelEncryptedOrder(poolKey, orderId);
+        hook.cancelEncryptedOrder(poolKey, orderId, cancelSignal);
     }
 
     function test_OrderStatusRetrieval() public {
@@ -466,7 +483,7 @@ contract ConfidentialTWAMME2ETest is Test, Deployers {
 
         (
             bool isActive,
-            bool isCancelled,
+            ebool isCancelled,
             address owner,
             uint64 startBlock,
             euint256 storedAmount,
@@ -474,7 +491,11 @@ contract ConfidentialTWAMME2ETest is Test, Deployers {
         ) = hook.getOrderStatus(poolKey, orderId);
 
         assertTrue(isActive);
-        assertFalse(isCancelled);
+        FHE.allowThis(isCancelled);
+        FHE.decrypt(isCancelled);
+        bool cancelled;
+        (cancelled,) = FHE.getDecryptResultSafe(isCancelled);
+        assertFalse(cancelled);
         assertEq(owner, alice);
         assertEq(startBlock, block.number);
         assertEq(euint256.unwrap(storedAmount), euint256.unwrap(encryptedAmount));

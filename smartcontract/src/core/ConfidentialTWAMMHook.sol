@@ -13,7 +13,7 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IConfidentialTWAMM} from "../interfaces/IConfidentialTWAMM.sol";
-import {FHE, euint256, euint64} from "cofhe-contracts/FHE.sol";
+import {FHE, euint256, euint64, ebool} from "cofhe-contracts/FHE.sol";
 
 contract ConfidentialTWAMMHook is BaseHook, IConfidentialTWAMM {
     using PoolIdLibrary for PoolKey;
@@ -73,16 +73,19 @@ contract ConfidentialTWAMMHook is BaseHook, IConfidentialTWAMM {
         PoolId poolId = poolKey.toId();
         orderId = _nextOrderId++;
         
+        euint256 zeroExecuted = euint256.wrap(0);
+        ebool falseCancelled = FHE.asEbool(false);
+        
         _orders[poolId][orderId] = EncryptedOrder({
             amount: amount,
             duration: duration,
             direction: direction,
             startBlock: uint64(block.number),
             lastExecutionBlock: uint64(block.number),
-            executedAmount: euint256.wrap(0),
+            executedAmount: zeroExecuted,
             owner: msg.sender,
             isActive: true,
-            isCancelled: false
+            isCancelled: falseCancelled
         });
 
         _activeOrderIds[poolId].push(orderId);
@@ -90,9 +93,13 @@ contract ConfidentialTWAMMHook is BaseHook, IConfidentialTWAMM {
         FHE.allowThis(amount);
         FHE.allowThis(duration);
         FHE.allowThis(direction);
+        FHE.allowThis(zeroExecuted);
+        FHE.allowThis(falseCancelled);
         FHE.allow(amount, msg.sender);
         FHE.allow(duration, msg.sender);
         FHE.allow(direction, msg.sender);
+        FHE.allow(zeroExecuted, msg.sender);
+        FHE.allow(falseCancelled, msg.sender);
 
         emit OrderSubmitted(orderId, msg.sender, poolKey);
         return orderId;
@@ -102,21 +109,49 @@ contract ConfidentialTWAMMHook is BaseHook, IConfidentialTWAMM {
         PoolId poolId = poolKey.toId();
         EncryptedOrder storage order = _orders[poolId][orderId];
         
-        if (!order.isActive || order.isCancelled) revert InvalidOrder();
+        if (!order.isActive) revert InvalidOrder();
+        
+        // Decrypt cancel status to check if order is cancelled
+        FHE.allowThis(order.isCancelled);
+        FHE.decrypt(order.isCancelled);
+        bool isCancelled;
+        (isCancelled,) = FHE.getDecryptResultSafe(order.isCancelled);
+        
+        if (isCancelled) revert InvalidOrder();
         if (block.number <= order.startBlock) revert OrderNotStarted();
 
         _executeSlice(poolKey, orderId, order);
     }
 
-    function cancelEncryptedOrder(PoolKey calldata poolKey, uint256 orderId) external override {
+    function cancelEncryptedOrder(PoolKey calldata poolKey, uint256 orderId, ebool cancelSignal) external override {
         PoolId poolId = poolKey.toId();
         EncryptedOrder storage order = _orders[poolId][orderId];
         
         if (msg.sender != order.owner) revert Unauthorized();
-        if (!order.isActive || order.isCancelled) revert InvalidOrder();
+        if (!order.isActive) revert InvalidOrder();
+        
+        // Decrypt cancel signal to verify it's true
+        FHE.allowThis(cancelSignal);
+        FHE.allowThis(order.isCancelled);
+        FHE.decrypt(cancelSignal);
+        
+        bool isCancelling;
+        (isCancelling,) = FHE.getDecryptResultSafe(cancelSignal);
+        
+        if (!isCancelling) revert InvalidOrder();
+        
+        // Decrypt current cancel status to check if already cancelled
+        FHE.decrypt(order.isCancelled);
+        bool alreadyCancelled;
+        (alreadyCancelled,) = FHE.getDecryptResultSafe(order.isCancelled);
+        
+        if (alreadyCancelled) revert InvalidOrder();
 
-        order.isCancelled = true;
+        order.isCancelled = cancelSignal;
         order.isActive = false;
+        
+        FHE.allowThis(order.isCancelled);
+        FHE.allow(order.isCancelled, msg.sender);
 
         _removeOrderFromActiveList(poolId, orderId);
         emit OrderCancelled(orderId, msg.sender);
@@ -153,7 +188,7 @@ contract ConfidentialTWAMMHook is BaseHook, IConfidentialTWAMM {
         override
         returns (
             bool isActive,
-            bool isCancelled,
+            ebool isCancelled,
             address owner,
             uint64 startBlock,
             euint256 amount,
@@ -188,8 +223,16 @@ contract ConfidentialTWAMMHook is BaseHook, IConfidentialTWAMM {
             uint256 orderId = activeOrders[i];
             EncryptedOrder storage order = _orders[poolId][orderId];
 
-            if (order.isActive && !order.isCancelled && currentBlock >= order.startBlock) {
-                _executeSlice(poolKey, orderId, order);
+            if (order.isActive && currentBlock >= order.startBlock) {
+                // Decrypt cancel status to check if order is cancelled
+                FHE.allowThis(order.isCancelled);
+                FHE.decrypt(order.isCancelled);
+                bool isCancelled;
+                (isCancelled,) = FHE.getDecryptResultSafe(order.isCancelled);
+                
+                if (!isCancelled) {
+                    _executeSlice(poolKey, orderId, order);
+                }
             }
 
             unchecked {
