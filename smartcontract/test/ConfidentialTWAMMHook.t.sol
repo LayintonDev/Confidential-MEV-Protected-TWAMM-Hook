@@ -16,7 +16,7 @@ import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/Pool
 
 import {ConfidentialTWAMMHook} from "../src/core/ConfidentialTWAMMHook.sol";
 import {IConfidentialTWAMM} from "../src/interfaces/IConfidentialTWAMM.sol";
-import {FHE, euint256, euint64} from "cofhe-contracts/FHE.sol";
+import {FHE, euint256, euint64, ebool} from "cofhe-contracts/FHE.sol";
 import {MockTaskManager} from "./mocks/MockTaskManager.sol";
 
 contract ConfidentialTWAMMHookTest is Test, Deployers {
@@ -104,22 +104,36 @@ contract ConfidentialTWAMMHookTest is Test, Deployers {
         return encrypted;
     }
 
+    function _createEncryptedDirection(uint64 value) internal returns (euint64) {
+        euint64 encrypted = FHE.asEuint64(value);
+        uint256 hash = euint64.unwrap(encrypted);
+        mockTaskManager.setDecryptResult(hash, value);
+        return encrypted;
+    }
+
+    function _createEncryptedCancelSignal(bool value) internal returns (ebool) {
+        ebool encrypted = FHE.asEbool(value);
+        uint256 hash = ebool.unwrap(encrypted);
+        mockTaskManager.setDecryptResult(hash, value ? 1 : 0);
+        return encrypted;
+    }
+
     function test_submitEncryptedOrder() public {
         euint256 amount = _createEncryptedValue(1000e18);
         euint64 duration = _createEncryptedDuration(100);
-        uint64 direction = 0;
+        euint64 encryptedDirection = _createEncryptedDirection(0);
 
         vm.prank(alice);
         vm.expectEmit(true, true, true, true);
         emit OrderSubmitted(1, alice, poolKey);
         
-        uint256 orderId = hook.submitEncryptedOrder(poolKey, amount, duration, direction);
+        uint256 orderId = hook.submitEncryptedOrder(poolKey, amount, duration, encryptedDirection);
 
         assertEq(orderId, 1);
         
         (
             bool isActive,
-            bool isCancelled,
+            ebool isCancelled,
             address owner,
             uint64 startBlock,
             euint256 storedAmount,
@@ -127,7 +141,12 @@ contract ConfidentialTWAMMHookTest is Test, Deployers {
         ) = hook.getOrderStatus(poolKey, orderId);
 
         assertTrue(isActive);
-        assertFalse(isCancelled);
+        // Check encrypted cancel status (should be false initially)
+        FHE.allowThis(isCancelled);
+        FHE.decrypt(isCancelled);
+        bool cancelled;
+        (cancelled,) = FHE.getDecryptResultSafe(isCancelled);
+        assertFalse(cancelled);
         assertEq(owner, alice);
         assertEq(startBlock, block.number);
         assertEq(euint256.unwrap(storedAmount), euint256.unwrap(amount));
@@ -142,8 +161,8 @@ contract ConfidentialTWAMMHookTest is Test, Deployers {
         euint64 duration2 = _createEncryptedDuration(200);
 
         vm.startPrank(alice);
-        uint256 orderId1 = hook.submitEncryptedOrder(poolKey, amount1, duration1, 0);
-        uint256 orderId2 = hook.submitEncryptedOrder(poolKey, amount2, duration2, 1);
+        uint256 orderId1 = hook.submitEncryptedOrder(poolKey, amount1, duration1, _createEncryptedDirection(0));
+        uint256 orderId2 = hook.submitEncryptedOrder(poolKey, amount2, duration2, _createEncryptedDirection(1));
         vm.stopPrank();
 
         assertEq(orderId1, 1);
@@ -158,45 +177,45 @@ contract ConfidentialTWAMMHookTest is Test, Deployers {
         assertEq(owner2, alice);
     }
 
-    function test_submitOrderInvalidDirection() public {
-        euint256 amount = _createEncryptedValue(1000e18);
-        euint64 duration = _createEncryptedDuration(100);
-        uint64 invalidDirection = 2;
-
-        vm.prank(alice);
-        vm.expectRevert(ConfidentialTWAMMHook.InvalidDirection.selector);
-        hook.submitEncryptedOrder(poolKey, amount, duration, invalidDirection);
-    }
+    // Note: Direction validation removed - encrypted values cannot be validated without decryption
+    // Client-side validation should ensure direction is 0 or 1 before encryption
 
     function test_cancelEncryptedOrder() public {
         euint256 amount = _createEncryptedValue(1000e18);
         euint64 duration = _createEncryptedDuration(100);
 
         vm.startPrank(alice);
-        uint256 orderId = hook.submitEncryptedOrder(poolKey, amount, duration, 0);
+        uint256 orderId = hook.submitEncryptedOrder(poolKey, amount, duration, _createEncryptedDirection(0));
         
+        ebool cancelSignal = _createEncryptedCancelSignal(true);
         vm.expectEmit(true, true, false, true);
         emit OrderCancelled(orderId, alice);
         
-        hook.cancelEncryptedOrder(poolKey, orderId);
+        hook.cancelEncryptedOrder(poolKey, orderId, cancelSignal);
         vm.stopPrank();
 
-        (bool isActive, bool isCancelled,,,,) = hook.getOrderStatus(poolKey, orderId);
+        (bool isActive, ebool isCancelled,,,,) = hook.getOrderStatus(poolKey, orderId);
 
         assertFalse(isActive);
-        assertTrue(isCancelled);
+        FHE.allowThis(isCancelled);
+        FHE.decrypt(isCancelled);
+        bool cancelled;
+        (cancelled,) = FHE.getDecryptResultSafe(isCancelled);
+        assertTrue(cancelled);
     }
 
     function test_cancelOrderUnauthorized() public {
         euint256 amount = _createEncryptedValue(1000e18);
         euint64 duration = _createEncryptedDuration(100);
+        euint64 encryptedDirection = _createEncryptedDirection(0);
 
         vm.prank(alice);
-        uint256 orderId = hook.submitEncryptedOrder(poolKey, amount, duration, 0);
+        uint256 orderId = hook.submitEncryptedOrder(poolKey, amount, duration, encryptedDirection);
 
         vm.prank(bob);
+        ebool cancelSignal = _createEncryptedCancelSignal(true);
         vm.expectRevert(ConfidentialTWAMMHook.Unauthorized.selector);
-        hook.cancelEncryptedOrder(poolKey, orderId);
+        hook.cancelEncryptedOrder(poolKey, orderId, cancelSignal);
     }
 
     function test_cancelOrderAlreadyCancelled() public {
@@ -204,11 +223,13 @@ contract ConfidentialTWAMMHookTest is Test, Deployers {
         euint64 duration = _createEncryptedDuration(100);
 
         vm.startPrank(alice);
-        uint256 orderId = hook.submitEncryptedOrder(poolKey, amount, duration, 0);
-        hook.cancelEncryptedOrder(poolKey, orderId);
+        uint256 orderId = hook.submitEncryptedOrder(poolKey, amount, duration, _createEncryptedDirection(0));
+        ebool cancelSignal = _createEncryptedCancelSignal(true);
+        hook.cancelEncryptedOrder(poolKey, orderId, cancelSignal);
         
+        ebool cancelSignal2 = _createEncryptedCancelSignal(true);
         vm.expectRevert(ConfidentialTWAMMHook.InvalidOrder.selector);
-        hook.cancelEncryptedOrder(poolKey, orderId);
+        hook.cancelEncryptedOrder(poolKey, orderId, cancelSignal2);
         vm.stopPrank();
     }
 
@@ -217,7 +238,7 @@ contract ConfidentialTWAMMHookTest is Test, Deployers {
         euint64 duration = _createEncryptedDuration(100);
 
         vm.prank(alice);
-        uint256 orderId = hook.submitEncryptedOrder(poolKey, amount, duration, 0);
+        uint256 orderId = hook.submitEncryptedOrder(poolKey, amount, duration, _createEncryptedDirection(0));
 
         vm.prank(alice);
         vm.expectRevert(ConfidentialTWAMMHook.OrderNotStarted.selector);
@@ -229,7 +250,7 @@ contract ConfidentialTWAMMHookTest is Test, Deployers {
         euint64 duration = _createEncryptedDuration(100);
 
         vm.prank(alice);
-        hook.submitEncryptedOrder(poolKey, amount, duration, 0);
+        hook.submitEncryptedOrder(poolKey, amount, duration, _createEncryptedDirection(0));
 
         uint256 blocksToAdvance = 150;
         vm.roll(block.number + blocksToAdvance);
@@ -275,8 +296,8 @@ contract ConfidentialTWAMMHookTest is Test, Deployers {
         euint64 duration2 = _createEncryptedDuration(200);
 
         vm.startPrank(alice);
-        uint256 orderId1 = hook.submitEncryptedOrder(poolKey, amount1, duration1, 0);
-        uint256 orderId2 = hook.submitEncryptedOrder(poolKey2, amount2, duration2, 1);
+        uint256 orderId1 = hook.submitEncryptedOrder(poolKey, amount1, duration1, _createEncryptedDirection(0));
+        uint256 orderId2 = hook.submitEncryptedOrder(poolKey2, amount2, duration2, _createEncryptedDirection(1));
         vm.stopPrank();
 
         assertEq(orderId1, 1);
@@ -294,7 +315,7 @@ contract ConfidentialTWAMMHookTest is Test, Deployers {
         euint64 duration = _createEncryptedDuration(100);
 
         vm.prank(alice);
-        hook.submitEncryptedOrder(poolKey, amount, duration, 0);
+        hook.submitEncryptedOrder(poolKey, amount, duration, _createEncryptedDirection(0));
 
         vm.roll(block.number + 50);
         
@@ -320,7 +341,7 @@ contract ConfidentialTWAMMHookTest is Test, Deployers {
     function test_getOrderStatusNonExistent() public {
         (
             bool isActive,
-            bool isCancelled,
+            ebool _isCancelled,
             address owner,
             uint64 startBlock,
             euint256 amount,
@@ -328,7 +349,8 @@ contract ConfidentialTWAMMHookTest is Test, Deployers {
         ) = hook.getOrderStatus(poolKey, 999);
 
         assertFalse(isActive);
-        assertFalse(isCancelled);
+        // For non-existent order, isCancelled will be uninitialized, skip check
+        // _isCancelled intentionally unused
         assertEq(owner, address(0));
         assertEq(startBlock, 0);
         assertEq(euint256.unwrap(amount), 0);
@@ -357,12 +379,14 @@ contract ConfidentialTWAMMHookTest is Test, Deployers {
     function test_executeSliceInvalidOrder() public {
         euint256 amount = _createEncryptedValue(1000e18);
         euint64 duration = _createEncryptedDuration(100);
+        euint64 encryptedDirection = _createEncryptedDirection(0);
 
         vm.prank(alice);
-        uint256 orderId = hook.submitEncryptedOrder(poolKey, amount, duration, 0);
+        uint256 orderId = hook.submitEncryptedOrder(poolKey, amount, duration, encryptedDirection);
 
+        ebool cancelSignal = _createEncryptedCancelSignal(true);
         vm.prank(alice);
-        hook.cancelEncryptedOrder(poolKey, orderId);
+        hook.cancelEncryptedOrder(poolKey, orderId, cancelSignal);
 
         vm.roll(block.number + 100);
         vm.prank(alice);

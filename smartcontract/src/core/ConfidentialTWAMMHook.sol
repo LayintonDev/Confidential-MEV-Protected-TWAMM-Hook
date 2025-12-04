@@ -6,15 +6,19 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
-import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {BalanceDelta, BalanceDeltaLibrary} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IConfidentialTWAMM} from "../interfaces/IConfidentialTWAMM.sol";
-import {FHE, euint256, euint64} from "cofhe-contracts/FHE.sol";
+import {FHE, euint256, euint64, ebool} from "cofhe-contracts/FHE.sol";
 
 contract ConfidentialTWAMMHook is BaseHook, IConfidentialTWAMM {
     using PoolIdLibrary for PoolKey;
+    using BalanceDeltaLibrary for BalanceDelta;
+    using CurrencyLibrary for Currency;
 
     uint256 private constant EXECUTION_INTERVAL = 100;
     uint256 private _nextOrderId = 1;
@@ -22,6 +26,10 @@ contract ConfidentialTWAMMHook is BaseHook, IConfidentialTWAMM {
     mapping(PoolId => mapping(uint256 => EncryptedOrder)) private _orders;
     mapping(PoolId => uint256[]) private _activeOrderIds;
     mapping(PoolId => uint256) private _lastExecutionBlock;
+    
+    // Track user balances per order for withdrawal
+    // orderId => currency => balance
+    mapping(uint256 => mapping(Currency => uint256)) private _orderBalances;
 
     constructor(IPoolManager _poolManager) BaseHook(_poolManager) {}
 
@@ -46,12 +54,13 @@ contract ConfidentialTWAMMHook is BaseHook, IConfidentialTWAMM {
 
     function _afterSwap(
         address,
-        PoolKey calldata key,
+        PoolKey calldata,
         SwapParams calldata,
         BalanceDelta,
         bytes calldata
     ) internal override returns (bytes4, int128) {
-        _checkAndExecuteSlices(key);
+        // Note: Cannot execute swaps from within hook callback (PoolManager is locked)
+        // TWAMM slices must be executed externally via executeTWAMMSlice()
         return (BaseHook.afterSwap.selector, 0);
     }
 
@@ -59,27 +68,38 @@ contract ConfidentialTWAMMHook is BaseHook, IConfidentialTWAMM {
         PoolKey calldata poolKey,
         euint256 amount,
         euint64 duration,
-        uint64 direction
+        euint64 direction
     ) external override returns (uint256 orderId) {
-        if (direction > 1) revert InvalidDirection();
-
         PoolId poolId = poolKey.toId();
         orderId = _nextOrderId++;
+        
+        euint256 zeroExecuted = euint256.wrap(0);
+        ebool falseCancelled = FHE.asEbool(false);
         
         _orders[poolId][orderId] = EncryptedOrder({
             amount: amount,
             duration: duration,
             direction: direction,
             startBlock: uint64(block.number),
+            lastExecutionBlock: uint64(block.number),
+            executedAmount: zeroExecuted,
             owner: msg.sender,
             isActive: true,
-            isCancelled: false
+            isCancelled: falseCancelled
         });
 
         _activeOrderIds[poolId].push(orderId);
         
         FHE.allowThis(amount);
         FHE.allowThis(duration);
+        FHE.allowThis(direction);
+        FHE.allowThis(zeroExecuted);
+        FHE.allowThis(falseCancelled);
+        FHE.allow(amount, msg.sender);
+        FHE.allow(duration, msg.sender);
+        FHE.allow(direction, msg.sender);
+        FHE.allow(zeroExecuted, msg.sender);
+        FHE.allow(falseCancelled, msg.sender);
 
         emit OrderSubmitted(orderId, msg.sender, poolKey);
         return orderId;
@@ -89,24 +109,77 @@ contract ConfidentialTWAMMHook is BaseHook, IConfidentialTWAMM {
         PoolId poolId = poolKey.toId();
         EncryptedOrder storage order = _orders[poolId][orderId];
         
-        if (!order.isActive || order.isCancelled) revert InvalidOrder();
+        if (!order.isActive) revert InvalidOrder();
+        
+        // Decrypt cancel status to check if order is cancelled
+        FHE.allowThis(order.isCancelled);
+        FHE.decrypt(order.isCancelled);
+        bool isCancelled;
+        (isCancelled,) = FHE.getDecryptResultSafe(order.isCancelled);
+        
+        if (isCancelled) revert InvalidOrder();
         if (block.number <= order.startBlock) revert OrderNotStarted();
 
         _executeSlice(poolKey, orderId, order);
     }
 
-    function cancelEncryptedOrder(PoolKey calldata poolKey, uint256 orderId) external override {
+    function cancelEncryptedOrder(PoolKey calldata poolKey, uint256 orderId, ebool cancelSignal) external override {
         PoolId poolId = poolKey.toId();
         EncryptedOrder storage order = _orders[poolId][orderId];
         
         if (msg.sender != order.owner) revert Unauthorized();
-        if (!order.isActive || order.isCancelled) revert InvalidOrder();
+        if (!order.isActive) revert InvalidOrder();
+        
+        // Decrypt cancel signal to verify it's true
+        FHE.allowThis(cancelSignal);
+        FHE.allowThis(order.isCancelled);
+        FHE.decrypt(cancelSignal);
+        
+        bool isCancelling;
+        (isCancelling,) = FHE.getDecryptResultSafe(cancelSignal);
+        
+        if (!isCancelling) revert InvalidOrder();
+        
+        // Decrypt current cancel status to check if already cancelled
+        FHE.decrypt(order.isCancelled);
+        bool alreadyCancelled;
+        (alreadyCancelled,) = FHE.getDecryptResultSafe(order.isCancelled);
+        
+        if (alreadyCancelled) revert InvalidOrder();
 
-        order.isCancelled = true;
+        order.isCancelled = cancelSignal;
         order.isActive = false;
+        
+        FHE.allowThis(order.isCancelled);
+        FHE.allow(order.isCancelled, msg.sender);
 
         _removeOrderFromActiveList(poolId, orderId);
         emit OrderCancelled(orderId, msg.sender);
+    }
+
+    function withdrawTokens(PoolKey calldata poolKey, uint256 orderId) external override {
+        PoolId poolId = poolKey.toId();
+        EncryptedOrder storage order = _orders[poolId][orderId];
+        
+        if (msg.sender != order.owner) revert Unauthorized();
+
+        Currency currency0 = poolKey.currency0;
+        Currency currency1 = poolKey.currency1;
+
+        uint256 balance0 = _orderBalances[orderId][currency0];
+        uint256 balance1 = _orderBalances[orderId][currency1];
+
+        if (balance0 > 0) {
+            _orderBalances[orderId][currency0] = 0;
+            currency0.transfer(msg.sender, balance0);
+            emit TokensWithdrawn(orderId, msg.sender, Currency.unwrap(currency0), balance0);
+        }
+
+        if (balance1 > 0) {
+            _orderBalances[orderId][currency1] = 0;
+            currency1.transfer(msg.sender, balance1);
+            emit TokensWithdrawn(orderId, msg.sender, Currency.unwrap(currency1), balance1);
+        }
     }
 
     function getOrderStatus(PoolKey calldata poolKey, uint256 orderId)
@@ -115,7 +188,7 @@ contract ConfidentialTWAMMHook is BaseHook, IConfidentialTWAMM {
         override
         returns (
             bool isActive,
-            bool isCancelled,
+            ebool isCancelled,
             address owner,
             uint64 startBlock,
             euint256 amount,
@@ -150,8 +223,16 @@ contract ConfidentialTWAMMHook is BaseHook, IConfidentialTWAMM {
             uint256 orderId = activeOrders[i];
             EncryptedOrder storage order = _orders[poolId][orderId];
 
-            if (order.isActive && !order.isCancelled && currentBlock >= order.startBlock) {
-                _executeSlice(poolKey, orderId, order);
+            if (order.isActive && currentBlock >= order.startBlock) {
+                // Decrypt cancel status to check if order is cancelled
+                FHE.allowThis(order.isCancelled);
+                FHE.decrypt(order.isCancelled);
+                bool isCancelled;
+                (isCancelled,) = FHE.getDecryptResultSafe(order.isCancelled);
+                
+                if (!isCancelled) {
+                    _executeSlice(poolKey, orderId, order);
+                }
             }
 
             unchecked {
@@ -163,11 +244,13 @@ contract ConfidentialTWAMMHook is BaseHook, IConfidentialTWAMM {
     }
 
     function _executeSlice(PoolKey calldata poolKey, uint256 orderId, EncryptedOrder storage order) internal {
-        uint256 blocksElapsed = block.number - order.startBlock;
+        // Use incremental calculation based on lastExecutionBlock
+        uint256 blocksSinceLastExecution = block.number - order.lastExecutionBlock;
         
-        if (blocksElapsed == 0) return;
+        if (blocksSinceLastExecution == 0) return;
 
-        euint256 sliceAmount = _calculateSliceAmount(order.amount, order.duration, blocksElapsed);
+        // Calculate incremental slice amount
+        euint256 sliceAmount = _calculateSliceAmount(order.amount, order.duration, blocksSinceLastExecution);
         
         if (euint256.unwrap(sliceAmount) == 0) return;
 
@@ -179,7 +262,35 @@ contract ConfidentialTWAMMHook is BaseHook, IConfidentialTWAMM {
         
         if (decryptedAmount == 0) return;
 
-        bool zeroForOne = order.direction == 0;
+        // Check if order is complete
+        euint256 newExecutedAmount = FHE.add(order.executedAmount, sliceAmount);
+        FHE.allowThis(newExecutedAmount);
+        FHE.decrypt(newExecutedAmount);
+        
+        uint256 totalExecuted;
+        (totalExecuted,) = FHE.getDecryptResultSafe(newExecutedAmount);
+        
+        uint256 totalAmount;
+        (totalAmount,) = FHE.getDecryptResultSafe(order.amount);
+        
+        // If we would exceed total, adjust slice amount
+        if (totalExecuted > totalAmount) {
+            decryptedAmount = totalAmount - (totalExecuted - decryptedAmount);
+            if (decryptedAmount == 0) {
+                order.isActive = false;
+                _removeOrderFromActiveList(poolKey.toId(), orderId);
+                return;
+            }
+        }
+
+        // Decrypt direction to determine swap direction
+        FHE.allowThis(order.direction);
+        FHE.decrypt(order.direction);
+        
+        uint64 decryptedDirection;
+        (decryptedDirection,) = FHE.getDecryptResultSafe(order.direction);
+        
+        bool zeroForOne = decryptedDirection == 0;
         
         SwapParams memory params = SwapParams({
             zeroForOne: zeroForOne,
@@ -188,9 +299,46 @@ contract ConfidentialTWAMMHook is BaseHook, IConfidentialTWAMM {
             sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
         });
 
-        poolManager.swap(poolKey, params, "");
+        BalanceDelta swapDelta = poolManager.swap(poolKey, params, "");
+        
+        // Handle swap delta to track balances for withdrawal
+        _handleSwapDelta(poolKey, orderId, swapDelta, zeroForOne);
+
+        // Update order state
+        order.lastExecutionBlock = uint64(block.number);
+        order.executedAmount = newExecutedAmount;
+        
+        // Check if order is complete
+        if (totalExecuted >= totalAmount) {
+            order.isActive = false;
+            _removeOrderFromActiveList(poolKey.toId(), orderId);
+            emit OrderExecuted(orderId, totalExecuted);
+        }
 
         emit SliceExecuted(orderId, decryptedAmount, block.number);
+    }
+
+    function _handleSwapDelta(PoolKey calldata poolKey, uint256 orderId, BalanceDelta swapDelta, bool zeroForOne) internal {
+        int128 delta0 = swapDelta.amount0();
+        int128 delta1 = swapDelta.amount1();
+        
+        Currency currency0 = poolKey.currency0;
+        Currency currency1 = poolKey.currency1;
+        
+        // For zeroForOne swap: we pay currency0 (negative delta0), receive currency1 (positive delta1)
+        // For oneForZero swap: we pay currency1 (negative delta1), receive currency0 (positive delta0)
+        
+        if (zeroForOne) {
+            // We receive currency1 (output token)
+            if (delta1 > 0) {
+                _orderBalances[orderId][currency1] += uint128(delta1);
+            }
+        } else {
+            // We receive currency0 (output token)
+            if (delta0 > 0) {
+                _orderBalances[orderId][currency0] += uint128(delta0);
+            }
+        }
     }
 
     function _calculateSliceAmount(euint256 totalAmount, euint64 duration, uint256 blocksElapsed)
@@ -233,4 +381,3 @@ contract ConfidentialTWAMMHook is BaseHook, IConfidentialTWAMM {
     error OrderNotStarted();
     error Unauthorized();
 }
-
