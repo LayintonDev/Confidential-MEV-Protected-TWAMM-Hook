@@ -1,0 +1,161 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: oklch(0.65 0.25 250);
+  --color-secondary: oklch(0.65 0.25 290);
+  --color-accent: oklch(0.55 0.20 160);
+  --color-destructive: oklch(0.60 0.25 25);
+
+  --color-background: oklch(0.15 0.02 250);
+  --color-foreground: oklch(0.90 0.01 250);
+
+  --color-card: oklch(0.18 0.02 250);
+  --color-muted: oklch(0.20 0.02 250);
+
+  --color-border: oklch(0.25 0.02 250);
+
+  --radius-lg: 0.5rem;
+  --radius-md: calc(0.5rem - 2px);
+  --radius-sm: calc(0.5rem - 4px);
+}
+
+:root {
+  /* Primary Colors */
+  --primary: 220 90% 56%;
+  --primary-foreground: 0 0% 100%;
+
+  /* Secondary Colors */
+  --secondary: 280 80% 60%;
+  --secondary-foreground: 0 0% 100%;
+
+  /* Accent Colors */
+  --accent: 160 84% 39%;
+  --accent-foreground: 0 0% 100%;
+
+  /* Destructive */
+  --destructive: 0 84% 60%;
+  --destructive-foreground: 0 0% 100%;
+
+  /* Background */
+  --background: 222 47% 11%;
+  --foreground: 213 31% 91%;
+
+  /* Card */
+  --card: 222 47% 14%;
+  --card-foreground: 213 31% 91%;
+
+  /* Popover */
+  --popover: 222 47% 14%;
+  --popover-foreground: 213 31% 91%;
+
+  /* Muted */
+  --muted: 217 33% 17%;
+  --muted-foreground: 215 20% 65%;
+
+  /* Border */
+  --border: 217 33% 17%;
+  --input: 217 33% 17%;
+  --ring: 220 90% 56%;
+
+  /* Radius */
+  --radius: 0.5rem;
+}
+
+@layer base {
+  * {
+    border-color: hsl(var(--border));
+  }
+
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+
+  /* Smooth scrolling */
+  html {
+    scroll-behavior: smooth;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background-color: hsl(var(--background));
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--muted));
+    border-radius: 9999px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(var(--muted-foreground));
+  }
+}
+
+@layer utilities {
+
+  /* Gradient text */
+  .gradient-text {
+    background-image: linear-gradient(to right, hsl(var(--primary)), hsl(var(--secondary)), hsl(var(--accent)));
+    background-clip: text;
+    -webkit-background-clip: text;
+    color: transparent;
+  }
+
+  /* Glass morphism */
+  .glass {
+    background-color: hsl(var(--card) / 0.5);
+    backdrop-filter: blur(24px);
+    border: 1px solid hsl(var(--border) / 0.5);
+  }
+
+  /* Animated gradient background */
+  .animated-gradient {
+    background: linear-gradient(-45deg,
+        hsl(var(--primary)),
+        hsl(var(--secondary)),
+        hsl(var(--accent)),
+        hsl(var(--primary)));
+    background-size: 400% 400%;
+    animation: gradient 15s ease infinite;
+  }
+
+  @keyframes gradient {
+    0% {
+      background-position: 0% 50%;
+    }
+
+    50% {
+      background-position: 100% 50%;
+    }
+
+    100% {
+      background-position: 0% 50%;
+    }
+  }
+
+  /* Shimmer effect */
+  .shimmer {
+    background: linear-gradient(90deg,
+        transparent,
+        rgba(255, 255, 255, 0.1),
+        transparent);
+    background-size: 200% 100%;
+    animation: shimmer 2s infinite;
+  }
+
+  @keyframes shimmer {
+    0% {
+      background-position: -200% 0;
+    }
+
+    100% {
+      background-position: 200% 0;
+    }
+  }
+}
