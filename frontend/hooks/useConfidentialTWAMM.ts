@@ -1,22 +1,37 @@
 'use client';
 
-import { useWriteContract, useReadContract, useWatchContractEvent } from 'wagmi';
+import { useWriteContract,  useReadContract, useWatchContractEvent, useWaitForTransactionReceipt, usePublicClient } from 'wagmi';
 import { CONFIDENTIAL_TWAMM_ABI } from '@/lib/contracts/abi';
 import { TWAMM_HOOK_ADDRESS, type PoolKey } from '@/lib/contracts/addresses';
 import type { EncryptedOrderParams } from '@/types/fhe';
+import { validateAndConvertOrder } from '@/lib/fhenix-validation';
 
 export function useConfidentialTWAMM() {
-    const { writeContract, data: hash, isPending, isSuccess, error } = useWriteContract();
+    const { writeContract, data: hash, isPending: isPendingWrite, error: errorWrite } = useWriteContract();
+    const publicClient = usePublicClient();
+    
+    // Only fetch receipt if we have a hash AND no write error
+    // This prevents polling after a transaction fails at submission
+    const { 
+        data: receipt, 
+        isSuccess: isSuccessReceipt,
+        isError: isErrorReceipt,
+        failureReason,
+        error: errorReceipt 
+    } = useWaitForTransactionReceipt({
+        hash: hash && !errorWrite ? hash : undefined,
+        confirmations: 1,
+    });
 
     /**
-     * Submit an encrypted TWAMM order
+     * Submit an encrypted TWAMM order and wait for confirmation
      */
     const submitOrder = async (
         poolKey: PoolKey,
         encryptedParams: EncryptedOrderParams
     ) => {
         try {
-            console.log('Submitting encrypted order with params:', {
+            console.log('[TWAMM] Submitting encrypted order with params:', {
                 amount: encryptedParams.amount,
                 duration: encryptedParams.duration,
                 direction: encryptedParams.direction,
@@ -25,40 +40,37 @@ export function useConfidentialTWAMM() {
                 directionType: typeof encryptedParams.direction,
             });
 
-            // Check if encrypted values are error objects (indicating encryption failed)
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const checkIsError = (val: any) => {
-                return val && typeof val === 'object' && 'success' in val && val.success === false;
-            };
+            // Validate encrypted values before submission
+            const validation = validateAndConvertOrder({
+                amount: encryptedParams.amount,
+                duration: encryptedParams.duration,
+                direction: encryptedParams.direction,
+            });
 
-            if (checkIsError(encryptedParams.amount)) {
-                throw new Error(`Amount encryption failed: ${encryptedParams.amount.error?.message || 'Unknown error'}`);
-            }
-            if (checkIsError(encryptedParams.duration)) {
-                throw new Error(`Duration encryption failed: ${encryptedParams.duration.error?.message || 'Unknown error'}`);
-            }
-            if (checkIsError(encryptedParams.direction)) {
-                throw new Error(`Direction encryption failed: ${encryptedParams.direction.error?.message || 'Unknown error'}`);
+            if (!validation.valid) {
+                console.error('[TWAMM] Order validation failed:', validation.errors);
+                throw new Error(`Order validation failed: ${validation.errors.join('; ')}`);
             }
 
-            // Convert encrypted values to proper format for contract
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const convertToNumber = (val: any) => {
-                if (typeof val === 'bigint') return val;
-                if (typeof val === 'string') {
-                    return BigInt(val.startsWith('0x') ? val : '0x' + val);
-                }
-                if (typeof val === 'number') return BigInt(val);
-                throw new Error(`Cannot convert ${typeof val} to BigInt`);
-            };
+            if (validation.warnings.length > 0) {
+                console.warn('[TWAMM] Order validation warnings:', validation.warnings);
+            }
 
-            const amount = convertToNumber(encryptedParams.amount);
-            const duration = convertToNumber(encryptedParams.duration);
-            const direction = convertToNumber(encryptedParams.direction);
+            console.log('[TWAMM] Order validation passed, converting to contract format');
 
-            console.log('Converted encrypted values to BigInt successfully');
+            // Use validated data for contract submission
+            const amount = validation.data!.amount;
+            const duration = validation.data!.duration;
+            const direction = validation.data!.direction;
 
-            return writeContract({
+            console.log('[TWAMM] Submitting to contract:', {
+                amount: amount.toString().substring(0, 20) + '...',
+                duration: duration.toString(),
+                direction: direction.toString(),
+            });
+
+            // Submit the transaction
+            const result = writeContract({
                 address: TWAMM_HOOK_ADDRESS,
                 abi: CONFIDENTIAL_TWAMM_ABI,
                 functionName: 'submitEncryptedOrder',
@@ -68,9 +80,54 @@ export function useConfidentialTWAMM() {
                     duration,
                     direction,
                 ],
+                gas: 500000n, // Set explicit gas limit to prevent overflow
             });
+
+            // Wait for transaction hash to be available
+            console.log('[TWAMM] Waiting for transaction hash...');
+
+            return result;
         } catch (error) {
-            console.error('Error in submitOrder:', error);
+            console.error('[TWAMM] Error in submitOrder:', error);
+            throw error;
+        }
+    };
+
+    /**
+     * Wait for a transaction to be confirmed (public helper function)
+     */
+    const waitForTransaction = async (txHash: `0x${string}` | undefined) => {
+        if (!txHash) {
+            throw new Error('No transaction hash available');
+        }
+
+        if (!publicClient) {
+            throw new Error('Public client not available');
+        }
+
+        console.log('[TWAMM] Waiting for transaction confirmation:', txHash);
+
+        try {
+            const receipt = await publicClient.waitForTransactionReceipt({
+                hash: txHash,
+                confirmations: 1,
+                pollingInterval: 1000, // Poll every 1 second
+            });
+
+            console.log('[TWAMM] Transaction confirmed:', {
+                hash: receipt.transactionHash,
+                blockNumber: receipt.blockNumber,
+                status: receipt.status,
+                gasUsed: receipt.gasUsed.toString(),
+            });
+
+            if (receipt.status === 'reverted') {
+                throw new Error('Transaction reverted on-chain');
+            }
+
+            return receipt;
+        } catch (error) {
+            console.error('[TWAMM] Error waiting for transaction:', error);
             throw error;
         }
     };
@@ -84,6 +141,7 @@ export function useConfidentialTWAMM() {
             abi: CONFIDENTIAL_TWAMM_ABI,
             functionName: 'executeTWAMMSlice',
             args: [poolKey, orderId],
+            gas: 300000n, // Set explicit gas limit
         });
     };
 
@@ -93,13 +151,14 @@ export function useConfidentialTWAMM() {
     const cancelOrder = async (
         poolKey: PoolKey,
         orderId: bigint,
-        cancelSignal: any
+        cancelSignal: unknown
     ) => {
         return writeContract({
             address: TWAMM_HOOK_ADDRESS,
             abi: CONFIDENTIAL_TWAMM_ABI,
             functionName: 'cancelEncryptedOrder',
             args: [poolKey, orderId, cancelSignal],
+            gas: 300000n, // Set explicit gas limit
         });
     };
 
@@ -112,6 +171,7 @@ export function useConfidentialTWAMM() {
             abi: CONFIDENTIAL_TWAMM_ABI,
             functionName: 'withdrawTokens',
             args: [poolKey, orderId],
+            gas: 200000n, // Set explicit gas limit
         });
     };
 
@@ -120,15 +180,19 @@ export function useConfidentialTWAMM() {
         executeSlice,
         cancelOrder,
         withdrawTokens,
+        waitForTransaction,
         hash,
-        isPending,
-        isSuccess,
-        error,
+        isPending: isPendingWrite,
+        isSuccess: isSuccessReceipt,
+        isError: isErrorReceipt,
+        failureReason,
+        receipt,
+        error: errorWrite || errorReceipt,
     };
 }
 
 /**
- * Hook to read order status
+ * Hook to read order status with automatic refetching
  */
 export function useOrderStatus(poolKey: PoolKey | undefined, orderId: bigint | undefined) {
     const { data, isLoading, error, refetch } = useReadContract({
@@ -138,7 +202,10 @@ export function useOrderStatus(poolKey: PoolKey | undefined, orderId: bigint | u
         args: poolKey && orderId !== undefined ? [poolKey, orderId] : undefined,
         query: {
             enabled: !!poolKey && orderId !== undefined,
-            refetchInterval: 10000, // Refetch every 10 seconds
+            refetchInterval: 2000, // Refetch every 2 seconds (was 10)
+            refetchOnWindowFocus: true,
+            refetchOnMount: true,
+            staleTime: 1000, // Data is stale after 1 second
         },
     });
 
@@ -160,7 +227,7 @@ export function useOrderStatus(poolKey: PoolKey | undefined, orderId: bigint | u
 /**
  * Hook to watch contract events
  */
-export function useOrderEvents(onOrderSubmitted?: (log: any) => void) {
+export function useOrderEvents(onOrderSubmitted?: (log: unknown) => void) {
     useWatchContractEvent({
         address: TWAMM_HOOK_ADDRESS,
         abi: CONFIDENTIAL_TWAMM_ABI,

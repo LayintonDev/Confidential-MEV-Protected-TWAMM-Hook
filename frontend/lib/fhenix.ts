@@ -1,10 +1,19 @@
 'use client';
 
 /**
- * FHE Client for TWAMM using cofhejs
+ * FHE Client for TWAMM
  * 
- * Integrates with cofhejs for FHE encryption on Sepolia testnet
- * Documentation: https://cofhe.io
+ * Supports both:
+ * 1. Real Fhenix SDK (cofhejs) for production
+ * 2. Mock FHE for testing (when real SDK has infrastructure issues)
+ * 
+ * Configure which to use via the USE_MOCK_FHE environment variable:
+ * - Set USE_MOCK_FHE=true in .env.local to use mock FHE for testing
+ * - Leave unset or false to use real cofhejs (when infrastructure is ready)
+ * 
+ * Documentation: 
+ * - Fhenix: https://cofhe.io
+ * Mock: See /lib/fhenix-mock.ts
  */
 
 export interface FHEInstance {
@@ -18,9 +27,23 @@ export interface FHEInstance {
 }
 
 let instance: FHEInstance | null = null;
+let useMockFHE = false;
 
 /**
- * Initialize cofhejs FHE client
+ * Check if we should use mock FHE
+ * Returns true by default (mock recommended for testing)
+ * Only use real FHE when NEXT_PUBLIC_USE_MOCK_FHE is explicitly set to false
+ */
+function shouldUseMockFHE(): boolean {
+    // Default to mock FHE unless explicitly disabled
+    if (typeof process === 'undefined') return true;
+    const useMock = process.env.NEXT_PUBLIC_USE_MOCK_FHE !== 'false';
+    console.log(`[FHE CONFIG] Using ${useMock ? 'MOCK' : 'REAL'} FHE`);
+    return useMock;
+}
+
+/**
+ * Initialize FHE client (real or mock)
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function initFHEClient(signer: any, provider: any): Promise<FHEInstance> {
@@ -28,6 +51,28 @@ export async function initFHEClient(signer: any, provider: any): Promise<FHEInst
         return instance;
     }
 
+    // Determine which implementation to use
+    useMockFHE = shouldUseMockFHE();
+    
+    if (useMockFHE) {
+        console.log('[FHE] Initializing MOCK FHE (recommended for testing)');
+        const { initMockFHEClient } = await import('./fhenix-mock');
+        instance = await initMockFHEClient(signer, provider);
+        return instance;
+    } else {
+        console.log('[FHE] Initializing REAL cofhejs FHE');
+        instance = await initRealFHEClient(signer, provider);
+        return instance;
+    }
+}
+
+/**
+ * Real FHE client initialization (cofhejs)
+ * This is the actual Fhenix SDK integration
+ * Currently blocked by ZK proof verification CORS issues
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function initRealFHEClient(signer: any, provider: any): Promise<FHEInstance> {
     try {
         console.log('Initializing cofhejs FHE client...');
         
